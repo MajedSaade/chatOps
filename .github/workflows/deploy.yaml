@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 env:
-  # Using the SSH URL so the EC2's SSH key (which we set up earlier) works for the pull
-  REPO_URL: git@github.com:MajedSaade/chatOps.git
+  # Public repo over HTTPS (no GitHub SSH key needed on EC2)
+  REPO_URL: https://github.com/MajedSaade/chatOps.git
   REPO_NAME: chatOps
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
       - name: Clone or Pull Code on EC2
         run: |
           ssh my-ec2 "if [ -d ~/${REPO_NAME} ]; then
-                       cd ~/${REPO_NAME} && git pull;
+                       cd ~/${REPO_NAME} && git remote set-url origin ${REPO_URL} && git pull origin main;
                      else
                        git clone ${REPO_URL} ~/${REPO_NAME};
                      fi"
