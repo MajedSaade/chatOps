@@ -1,0 +1,52 @@
+name: Deploy ChatOps Bot
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  # Using the SSH URL so the EC2's SSH key (which we set up earlier) works for the pull
+  REPO_URL: git@github.com:MajedSaade/chatOps.git
+  REPO_NAME: chatOps
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ubuntu
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/private_key
+          chmod 600 ~/.ssh/private_key
+          cat > ~/.ssh/config << EOF
+          Host my-ec2
+            HostName $EC2_HOST
+            User $EC2_USERNAME
+            IdentityFile ~/.ssh/private_key
+            StrictHostKeyChecking no
+          EOF
+
+      - name: Clone or Pull Code on EC2
+        run: |
+          ssh my-ec2 "if [ -d ~/${REPO_NAME} ]; then
+                       cd ~/${REPO_NAME} && git pull;
+                     else
+                       git clone ${REPO_URL} ~/${REPO_NAME};
+                     fi"
+
+      - name: Run Deployment Script on EC2
+        env:
+          # Pass the token from GitHub Secrets to the EC2 script
+          DISCORD_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+        run: |
+          ssh my-ec2 "export DISCORD_TOKEN=\"$DISCORD_TOKEN\" && cd ~/${REPO_NAME} && bash ./deploy.sh"
