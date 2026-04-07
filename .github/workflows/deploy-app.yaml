@@ -38,20 +38,22 @@ jobs:
           IMG_NAME: ${{ secrets.DOCKERHUB_USERNAME }}${{ inputs.image }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE || 'default' }}
-          LLM_AGENT_URL: ${{ vars.LLM_AGENT_URL || 'http://127.0.0.1:11434' }}
-          LLM_AGENT_TIMEOUT: ${{ vars.LLM_AGENT_TIMEOUT || '120' }}
-          STATUS_SERVER_PORT: ${{ vars.STATUS_SERVER_PORT || '8443' }}
+          # Updated to match your exact variable names and defaults:
+          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'llama3.2:1b' }}
+          OLLAMA_CHAT_URL: ${{ vars.OLLAMA_CHAT_URL || 'http://host.docker.internal:11434/api/chat' }}
+          OLLAMA_TIMEOUT_SECONDS: ${{ vars.OLLAMA_TIMEOUT_SECONDS || '60' }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: IMG_NAME,DISCORD_BOT_TOKEN,KUBE_NAMESPACE,LLM_AGENT_URL,LLM_AGENT_TIMEOUT,STATUS_SERVER_PORT,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          command_timeout: 30m # Extended timeout for downloading the model
+          envs: IMG_NAME,DISCORD_BOT_TOKEN,KUBE_NAMESPACE,OLLAMA_MODEL,OLLAMA_CHAT_URL,OLLAMA_TIMEOUT_SECONDS,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
           script: |
             set -euo pipefail
 
-            # 1. Check for Docker and install the OFFICIAL version if missing
+            # 1. Check for Docker and install it if missing
             if ! command -v docker >/dev/null 2>&1; then
               echo "Docker not found. Installing official Docker Engine..."
               curl -fsSL https://get.docker.com -o get-docker.sh
@@ -59,29 +61,44 @@ jobs:
               sudo systemctl enable --now docker
             fi
 
+            # 2. Check for Ollama and install it if missing
+            if ! command -v ollama >/dev/null 2>&1; then
+              echo "Ollama not found. Installing Ollama..."
+              curl -fsSL https://ollama.com/install.sh | sh
+              sudo systemctl enable --now ollama || true
+            fi
+
+            # 3. Ensure Ollama is running, then pull the specific model
+            echo "Ensuring Ollama service is running..."
+            sudo systemctl start ollama
+            sleep 5 
+            
+            echo "Pulling AI model: ${OLLAMA_MODEL} (This will take a few minutes on the first run!)..."
+            ollama pull ${OLLAMA_MODEL}
+
             cd ~/discordapp-deploy
 
-            # 2. Rename the copied file so docker compose recognizes it automatically
+            # 4. Rename the copied file so docker compose recognizes it automatically
             mv docker-compose.app.yaml docker-compose.yml || true
 
-            # 3. Generate .env file securely on the server
+            # 5. Generate .env file with your specific variables
             cat > .env << EOL
             IMG_NAME=${IMG_NAME}
             ENVIRONMENT=production
             DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
             KUBE_NAMESPACE=${KUBE_NAMESPACE}
-            LLM_AGENT_URL=${LLM_AGENT_URL}
-            LLM_AGENT_TIMEOUT=${LLM_AGENT_TIMEOUT}
-            STATUS_SERVER_PORT=${STATUS_SERVER_PORT}
+            OLLAMA_MODEL=${OLLAMA_MODEL}
+            OLLAMA_CHAT_URL=${OLLAMA_CHAT_URL}
+            OLLAMA_TIMEOUT_SECONDS=${OLLAMA_TIMEOUT_SECONDS}
             EOL
 
-            # 4. Log into Docker Hub
+            # 6. Log into Docker Hub securely
             echo "${DOCKERHUB_TOKEN}" | sudo docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-            # 5. Pull updates and restart gracefully
+            # 7. Pull updates and restart gracefully
             sudo -E docker compose down --remove-orphans || true
             sudo -E docker compose pull
             sudo -E docker compose up -d
             sudo docker image prune -f
 
-            echo "Deployment completed successfully!!"
+            echo "Deployment completed successfully!"
