@@ -1,0 +1,87 @@
+name: Deploy App
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      EC2_SSH_KEY:
+        required: true
+      EC2_HOST:
+        required: true
+      EC2_USERNAME:
+        required: true
+      DISCORD_BOT_TOKEN:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copy compose file to EC2
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" "mkdir -p ~/discordapp-deploy"
+          scp -i ~/.ssh/id_rsa docker-compose.app.yaml "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:~/discordapp-deploy/docker-compose.yml"
+
+      - name: Deploy on EC2
+        env:
+          IMG_NAME: ${{ secrets.DOCKERHUB_USERNAME }}${{ inputs.image }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+          LLM_AGENT_URL: ${{ vars.LLM_AGENT_URL }}
+          LLM_AGENT_TIMEOUT: ${{ vars.LLM_AGENT_TIMEOUT }}
+          STATUS_SERVER_PORT: ${{ vars.STATUS_SERVER_PORT }}
+        run: |
+          set -euo pipefail
+
+          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" << EOF
+          set -euo pipefail
+
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y docker.io docker-compose-plugin
+            sudo systemctl enable --now docker
+            sudo usermod -aG docker \$USER || true
+          fi
+
+          mkdir -p ~/discordapp-deploy
+          cd ~/discordapp-deploy
+
+          cat > .env << EOL
+          IMG_NAME=${IMG_NAME}
+          ENVIRONMENT=production
+          DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+          KUBE_NAMESPACE=${KUBE_NAMESPACE:-default}
+          LLM_AGENT_URL=${LLM_AGENT_URL:-http://127.0.0.1:11434}
+          LLM_AGENT_TIMEOUT=${LLM_AGENT_TIMEOUT:-120}
+          STATUS_SERVER_PORT=${STATUS_SERVER_PORT:-8443}
+          EOL
+
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+          sudo -E docker compose down --remove-orphans || true
+          sudo -E docker compose pull
+          sudo -E docker compose up -d
+          sudo docker image prune -f
+
+          echo "Deployment completed successfully"
+          EOF

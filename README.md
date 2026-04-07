@@ -64,3 +64,36 @@ DiscordApp/
 
 - The bot replies to non-bot messages without requiring a mention.
 - Kubernetes and AWS credentials must be available in the runtime environment.
+
+## Docker
+
+### Build and run locally
+
+```bash
+docker build -t discordapp:local .
+docker run --rm -p 8443:8443 --env-file .env discordapp:local
+```
+
+### GitHub Actions container deployment
+
+This repository now uses:
+
+- `.github/workflows/build-app.yaml` to build and push an image to Docker Hub
+- `.github/workflows/deploy-app.yaml` to deploy that image on EC2 using Docker Compose
+
+Required GitHub secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+- `EC2_SSH_KEY`
+- `EC2_HOST`
+- `EC2_USERNAME`
+- `DISCORD_BOT_TOKEN`
+
+Optional GitHub variables:
+
+- `DOCKERHUB_REPOSITORY` (default: `discordapp`)
+- `KUBE_NAMESPACE` (default: `default`)
+- `LLM_AGENT_URL` (default: `http://127.0.0.1:11434`)
+- `LLM_AGENT_TIMEOUT` (default: `120`)
+- `STATUS_SERVER_PORT` (default: `8443`)
