@@ -9,7 +9,6 @@ SERVICE_FILE="/etc/systemd/system/discord-bot.service"
 
 echo "🚀 Starting Deployment for ChatOps..."
 
-# Validate Token exists in the SSH environment
 if [ -z "${DISCORD_TOKEN:-}" ]; then
     echo "❌ DISCORD_TOKEN is missing. Aborting deployment."
     exit 1
@@ -20,9 +19,11 @@ if [ ! -d "$PROJECT_DIR" ]; then
     exit 1
 fi
 
-# 1. Create the virtual environment if it doesn't exist
-if [ ! -d "$VENV_DIR" ]; then
-    echo "📦 Creating virtual environment..."
+# 1. The Fix: Check for the pip executable, not just the directory
+if [ ! -f "$VENV_DIR/bin/pip" ]; then
+    echo "📦 Creating/Rebuilding virtual environment..."
+    # Wipe the folder in case it's a broken/empty shell from a previous failure
+    rm -rf "$VENV_DIR"
     python3 -m venv "$VENV_DIR"
 fi
 
@@ -37,10 +38,9 @@ cat > "$PROJECT_DIR/.env" << EOF
 ENVIRONMENT=production
 DISCORD_BOT_TOKEN=$DISCORD_TOKEN
 EOF
-# Ensure only the ubuntu user can read this file
 chmod 600 "$PROJECT_DIR/.env"
 
-# 4. Write the systemd service file
+# 4. Write the systemd service file (Using your exact specifications)
 echo "⚙️ Writing systemd service file..."
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
@@ -49,9 +49,7 @@ After=network.target
 
 [Service]
 User=ubuntu
-Group=ubuntu
 WorkingDirectory=$PROJECT_DIR
-# Systemd will inject the token from this file into the bot's environment
 EnvironmentFile=$PROJECT_DIR/.env
 ExecStart=$VENV_DIR/bin/python -m app.app
 Environment=PYTHONUNBUFFERED=1
@@ -68,9 +66,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable discord-bot
 sudo systemctl restart discord-bot
 
-# 6. Check the status to ensure it didn't crash immediately
 echo "⏳ Checking service status..."
-sleep 2 # Give the bot a moment to start or crash
+sleep 2
 sudo systemctl --no-pager status discord-bot | grep "Active:"
 
 echo "✅ Deployment Successful!"
