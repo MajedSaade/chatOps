@@ -6,7 +6,7 @@ set -euo pipefail
 PROJECT_DIR="/home/ubuntu/chatOps"
 VENV_DIR="/home/ubuntu/venv"
 SERVICE_FILE="/etc/systemd/system/discord-bot.service"
-OLLAMA_MODEL="${OLLAMA_MODEL:-llama3}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2:1b}"
 OLLAMA_CHAT_URL="${OLLAMA_CHAT_URL:-http://127.0.0.1:11434/api/chat}"
 OLLAMA_TIMEOUT_SECONDS="${OLLAMA_TIMEOUT_SECONDS:-60}"
 
