@@ -45,11 +45,14 @@ jobs:
 
       - name: Install System Dependencies on EC2
         run: |
-          # Ensures the venv module is installed to prevent 'ensurepip' errors
-          ssh my-ec2 "sudo apt-get update && sudo apt-get install -y python3-venv"
+          # Ensures required system packages exist before deploy.sh runs
+          ssh my-ec2 "sudo apt-get update && sudo apt-get install -y python3-venv curl"
 
       - name: Run Deployment Script on EC2
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL }}
+          OLLAMA_CHAT_URL: ${{ vars.OLLAMA_CHAT_URL }}
+          OLLAMA_TIMEOUT_SECONDS: ${{ vars.OLLAMA_TIMEOUT_SECONDS }}
         run: |
-          ssh my-ec2 "export DISCORD_TOKEN=\"$DISCORD_TOKEN\" && cd ~/${REPO_NAME} && bash ./deploy.sh"
+          ssh my-ec2 "export DISCORD_TOKEN=\"$DISCORD_TOKEN\" OLLAMA_MODEL=\"${OLLAMA_MODEL:-}\" OLLAMA_CHAT_URL=\"${OLLAMA_CHAT_URL:-}\" OLLAMA_TIMEOUT_SECONDS=\"${OLLAMA_TIMEOUT_SECONDS:-}\" && cd ~/${REPO_NAME} && bash ./deploy.sh"
