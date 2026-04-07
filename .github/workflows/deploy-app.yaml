@@ -6,19 +6,6 @@ on:
       image:
         required: true
         type: string
-    secrets:
-      DOCKERHUB_USERNAME:
-        required: true
-      DOCKERHUB_TOKEN:
-        required: true
-      EC2_SSH_KEY:
-        required: true
-      EC2_HOST:
-        required: true
-      EC2_USERNAME:
-        required: true
-      DISCORD_BOT_TOKEN:
-        required: true
 
 jobs:
   deploy:
@@ -28,60 +15,64 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+      - name: Prepare directory on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: mkdir -p ~/discordapp-deploy
 
       - name: Copy compose file to EC2
-        run: |
-          set -euo pipefail
-          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" "mkdir -p ~/discordapp-deploy"
-          scp -i ~/.ssh/id_rsa docker-compose.app.yaml "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:~/discordapp-deploy/docker-compose.yml"
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "docker-compose.app.yaml"
+          target: "~/discordapp-deploy"
 
       - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1.0.3
         env:
           IMG_NAME: ${{ secrets.DOCKERHUB_USERNAME }}${{ inputs.image }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
-          LLM_AGENT_URL: ${{ vars.LLM_AGENT_URL }}
-          LLM_AGENT_TIMEOUT: ${{ vars.LLM_AGENT_TIMEOUT }}
-          STATUS_SERVER_PORT: ${{ vars.STATUS_SERVER_PORT }}
-        run: |
-          set -euo pipefail
+          KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE || 'default' }}
+          LLM_AGENT_URL: ${{ vars.LLM_AGENT_URL || 'http://127.0.0.1:11434' }}
+          LLM_AGENT_TIMEOUT: ${{ vars.LLM_AGENT_TIMEOUT || '120' }}
+          STATUS_SERVER_PORT: ${{ vars.STATUS_SERVER_PORT || '8443' }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMG_NAME,DISCORD_BOT_TOKEN,KUBE_NAMESPACE,LLM_AGENT_URL,LLM_AGENT_TIMEOUT,STATUS_SERVER_PORT,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          script: |
+            set -euo pipefail
+            cd ~/discordapp-deploy
 
-          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" << EOF
-          set -euo pipefail
+            # Rename the copied file so docker compose recognizes it automatically
+            mv docker-compose.app.yaml docker-compose.yml || true
 
-          if ! command -v docker >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y docker.io docker-compose-plugin
-            sudo systemctl enable --now docker
-            sudo usermod -aG docker \$USER || true
-          fi
+            # Generate .env file
+            cat > .env << EOL
+            IMG_NAME=${IMG_NAME}
+            ENVIRONMENT=production
+            DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+            KUBE_NAMESPACE=${KUBE_NAMESPACE}
+            LLM_AGENT_URL=${LLM_AGENT_URL}
+            LLM_AGENT_TIMEOUT=${LLM_AGENT_TIMEOUT}
+            STATUS_SERVER_PORT=${STATUS_SERVER_PORT}
+            EOL
 
-          mkdir -p ~/discordapp-deploy
-          cd ~/discordapp-deploy
+            # Log into Docker Hub securely
+            echo "${DOCKERHUB_TOKEN}" | sudo docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-          cat > .env << EOL
-          IMG_NAME=${IMG_NAME}
-          ENVIRONMENT=production
-          DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-          KUBE_NAMESPACE=${KUBE_NAMESPACE:-default}
-          LLM_AGENT_URL=${LLM_AGENT_URL:-http://127.0.0.1:11434}
-          LLM_AGENT_TIMEOUT=${LLM_AGENT_TIMEOUT:-120}
-          STATUS_SERVER_PORT=${STATUS_SERVER_PORT:-8443}
-          EOL
+            # Pull updates and restart gracefully
+            sudo -E docker compose down --remove-orphans || true
+            sudo -E docker compose pull
+            sudo -E docker compose up -d
+            sudo docker image prune -f
 
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-
-          sudo -E docker compose down --remove-orphans || true
-          sudo -E docker compose pull
-          sudo -E docker compose up -d
-          sudo docker image prune -f
-
-          echo "Deployment completed successfully"
-          EOF
+            echo "Deployment completed successfully!"
