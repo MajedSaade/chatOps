@@ -7,7 +7,6 @@ on:
   workflow_dispatch:
 
 env:
-  # Public repo over HTTPS (no GitHub SSH key needed on EC2)
   REPO_URL: https://github.com/MajedSaade/chatOps.git
   REPO_NAME: chatOps
 
@@ -44,9 +43,13 @@ jobs:
                        git clone ${REPO_URL} ~/${REPO_NAME};
                      fi"
 
+      - name: Install System Dependencies on EC2
+        run: |
+          # Ensures the venv module is installed to prevent 'ensurepip' errors
+          ssh my-ec2 "sudo apt-get update && sudo apt-get install -y python3-venv"
+
       - name: Run Deployment Script on EC2
         env:
-          # Pass the token from GitHub Secrets to the EC2 script
           DISCORD_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
         run: |
           ssh my-ec2 "export DISCORD_TOKEN=\"$DISCORD_TOKEN\" && cd ~/${REPO_NAME} && bash ./deploy.sh"

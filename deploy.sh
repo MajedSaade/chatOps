@@ -9,6 +9,7 @@ SERVICE_FILE="/etc/systemd/system/discord-bot.service"
 
 echo "🚀 Starting Deployment for ChatOps..."
 
+# Validate Token exists in the SSH environment
 if [ -z "${DISCORD_TOKEN:-}" ]; then
     echo "❌ DISCORD_TOKEN is missing. Aborting deployment."
     exit 1
@@ -30,14 +31,16 @@ echo "📥 Installing dependencies..."
 "$VENV_DIR/bin/pip" install --upgrade pip
 "$VENV_DIR/bin/pip" install -r "$PROJECT_DIR/requirements.txt"
 
-# 3. Create or update the .env file using the variable passed from GitHub
-echo "🔐 Generating .env file..."
+# 3. Create or update the .env file securely
+echo "🔐 Generating secure .env file..."
 cat > "$PROJECT_DIR/.env" << EOF
 ENVIRONMENT=production
 DISCORD_BOT_TOKEN=$DISCORD_TOKEN
 EOF
+# Ensure only the ubuntu user can read this file
+chmod 600 "$PROJECT_DIR/.env"
 
-# 4. Always write the known-good systemd unit for consistent deploys
+# 4. Write the systemd service file
 echo "⚙️ Writing systemd service file..."
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
@@ -46,8 +49,11 @@ After=network.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/home/ubuntu/chatOps
-ExecStart=/home/ubuntu/venv/bin/python -m app.app
+Group=ubuntu
+WorkingDirectory=$PROJECT_DIR
+# Systemd will inject the token from this file into the bot's environment
+EnvironmentFile=$PROJECT_DIR/.env
+ExecStart=$VENV_DIR/bin/python -m app.app
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5
@@ -55,13 +61,16 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-sudo systemctl daemon-reload
-sudo systemctl enable discord-bot
 
-# 5. Restart the bot to apply the new code
+# 5. Reload, Enable, and Restart the bot
 echo "🔄 Restarting the Discord Bot..."
 sudo systemctl daemon-reload
+sudo systemctl enable discord-bot
 sudo systemctl restart discord-bot
-sudo systemctl --no-pager --full status discord-bot | head -n 20
+
+# 6. Check the status to ensure it didn't crash immediately
+echo "⏳ Checking service status..."
+sleep 2 # Give the bot a moment to start or crash
+sudo systemctl --no-pager status discord-bot | grep "Active:"
 
 echo "✅ Deployment Successful!"
