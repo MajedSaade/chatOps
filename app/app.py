@@ -24,6 +24,8 @@ if ENVIRONMENT == "development":
 else:
     DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 
+AI_GATEWAY_URL = os.getenv("AI_GATEWAY_URL", "").strip()
+
 STATUS_SERVER_PORT = int(os.getenv("STATUS_SERVER_PORT", "8443"))
 
 app = FastAPI()
@@ -42,6 +44,8 @@ def run_status_server() -> None:
 async def main() -> None:
     if not DISCORD_BOT_TOKEN:
         raise SystemExit("ERROR: DISCORD_BOT_TOKEN or DISCORD_DEV_BOT_TOKEN must be set")
+    if not AI_GATEWAY_URL:
+        raise SystemExit("ERROR: AI_GATEWAY_URL must be set")
 
     status_thread = threading.Thread(target=run_status_server, daemon=True)
     status_thread.start()

@@ -3,7 +3,7 @@
 A gateway-based Discord bot with:
 
 - Slash commands for Kubernetes and AWS checks
-- Automatic chat replies in server channels and DMs
+- Message relay to an external AI gateway service
 - A lightweight FastAPI status endpoint
 
 ## Quick Start
@@ -33,6 +33,8 @@ Set these values in `.env`:
 - `ENVIRONMENT` (`production` or `development`)
 - `STATUS_SERVER_PORT` (optional, default `8443`)
 - `KUBE_NAMESPACE` (optional, default `default`)
+- `AI_GATEWAY_URL` (required, your backend endpoint)
+- `AI_GATEWAY_TIMEOUT_SECONDS` (optional, default `30`)
 
 ### 4. Run the app
 
@@ -54,15 +56,14 @@ DiscordApp/
 └── app/
     ├── __init__.py
     ├── app.py        # Main entrypoint and status server
-    ├── bot.py        # Class-based Discord gateway bot
-    ├── chat.py       # Conversational message responses
+    ├── bot.py        # Class-based Discord gateway relay bot
     ├── commands.py   # K8s and AWS command handlers
     └── config.py     # Environment loading and config
 ```
 
 ## Notes
 
-- The bot replies to non-bot messages without requiring a mention.
+- The bot relays non-command messages to `AI_GATEWAY_URL` and returns gateway text responses.
 - Kubernetes and AWS credentials must be available in the runtime environment.
 
 ## Docker
@@ -94,6 +95,6 @@ Optional GitHub variables:
 
 - `DOCKERHUB_REPOSITORY` (default: `discordapp`)
 - `KUBE_NAMESPACE` (default: `default`)
-- `LLM_AGENT_URL` (default: `http://127.0.0.1:11434`)
-- `LLM_AGENT_TIMEOUT` (default: `120`)
+- `AI_GATEWAY_URL` (required)
+- `AI_GATEWAY_TIMEOUT_SECONDS` (default: `30`)
 - `STATUS_SERVER_PORT` (default: `8443`)

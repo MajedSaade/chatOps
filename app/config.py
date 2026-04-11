@@ -31,6 +31,6 @@ if _missing:
 # ── Optional variables ──────────────────────────────────────────────
 KUBE_NAMESPACE: str = os.getenv("KUBE_NAMESPACE", "default")
 
-# Self-hosted LLM agent endpoint
-LLM_AGENT_URL: str = os.getenv("LLM_AGENT_URL", "http://localhost:11434")
-LLM_AGENT_TIMEOUT: int = int(os.getenv("LLM_AGENT_TIMEOUT", "120"))
+# External AI gateway endpoint for command relays
+AI_GATEWAY_URL: str = os.getenv("AI_GATEWAY_URL", "")
+AI_GATEWAY_TIMEOUT_SECONDS: int = int(os.getenv("AI_GATEWAY_TIMEOUT_SECONDS", "30"))

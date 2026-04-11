@@ -1,15 +1,16 @@
 import logging
 import asyncio
+import os
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from app.chat import OllamaError, ask_ollama, get_response
 from app.commands import get_aws_cost, get_cluster_health, get_logs
 
 logger = logging.getLogger("discord-bot")
-LLM_ERROR_MESSAGE = "I couldn't connect to my local brain. Make sure Ollama is running!"
+GATEWAY_ERROR_MESSAGE = "I couldn't reach the AI gateway right now. Please try again shortly."
 
 
 class GatewayBot:
@@ -18,11 +19,52 @@ class GatewayBot:
         intents.message_content = True
 
         self.token = token
+        self.ai_gateway_url = os.getenv("AI_GATEWAY_URL", "").strip()
+        self.ai_gateway_timeout_seconds = int(os.getenv("AI_GATEWAY_TIMEOUT_SECONDS", "30"))
         self.client = commands.Bot(command_prefix="!", intents=intents)
         self._presence_task: asyncio.Task | None = None
         self._synced = False
         self._register_events()
         self._register_slash_commands()
+
+    @staticmethod
+    def _extract_first_image_url(message: discord.Message) -> str | None:
+        for attachment in message.attachments:
+            content_type = (attachment.content_type or "").lower()
+            filename = attachment.filename.lower()
+            if content_type.startswith("image/") or filename.endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+            ):
+                return attachment.url
+        return None
+
+    async def _build_gateway_payload(self, message: discord.Message) -> dict[str, str | None]:
+        return {
+            "user_id": str(message.author.id),
+            "command_text": message.content,
+            "image_url": self._extract_first_image_url(message),
+        }
+
+    async def _relay_to_gateway(self, payload: dict[str, str | None]) -> str:
+        if not self.ai_gateway_url:
+            raise RuntimeError("AI_GATEWAY_URL is not configured")
+
+        timeout = aiohttp.ClientTimeout(total=self.ai_gateway_timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(self.ai_gateway_url, json=payload) as response:
+                if response.status >= 400:
+                    body = await response.text()
+                    raise RuntimeError(
+                        f"Gateway returned HTTP {response.status}: {body[:300]}"
+                    )
+
+                data = await response.json()
+                for key in ("text", "response", "result", "message"):
+                    value = data.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+
+                raise RuntimeError("Gateway response JSON did not include a text field")
 
     async def _set_online_presence(self) -> None:
         await self.client.change_presence(
@@ -65,34 +107,19 @@ class GatewayBot:
 
             await self.client.process_commands(message)
 
-            content = message.content.strip()
-            if content.startswith("!"):
+            if message.content.strip().startswith("!"):
                 return
 
-            was_mentioned = False
-            if self.client.user is not None:
-                was_mentioned = self.client.user in message.mentions
-                content = content.replace(f"<@{self.client.user.id}>", "").strip()
-                content = content.replace(f"<@!{self.client.user.id}>", "").strip()
+            payload = await self._build_gateway_payload(message)
+            logger.info("Relaying payload for user %s", payload["user_id"])
 
-            if not content:
-                content = "hi"
-
-            logger.info("Message from %s: %s", message.author, content[:120])
-
-            if was_mentioned:
-                try:
-                    async with message.channel.typing():
-                        response = await ask_ollama(content)
-                    await message.reply(response, mention_author=False)
-                except OllamaError:
-                    logger.exception("Mention-based Ollama request failed")
-                    await message.reply(LLM_ERROR_MESSAGE, mention_author=False)
-                return
-
-            async with message.channel.typing():
-                response = get_response(content)
-            await message.reply(response, mention_author=False)
+            try:
+                async with message.channel.typing():
+                    response_text = await self._relay_to_gateway(payload)
+                await message.reply(response_text, mention_author=False)
+            except (RuntimeError, aiohttp.ClientError, aiohttp.ContentTypeError, asyncio.TimeoutError):
+                logger.exception("Gateway relay request failed")
+                await message.reply(GATEWAY_ERROR_MESSAGE, mention_author=False)
 
     async def _presence_refresher(self) -> None:
         while not self.client.is_closed():
@@ -127,20 +154,6 @@ class GatewayBot:
         async def aws_cost(interaction: discord.Interaction) -> None:
             await interaction.response.defer(thinking=True)
             await interaction.followup.send(get_aws_cost())
-
-        @self.client.tree.command(
-            name="ask",
-            description="Ask the local Ollama model a question",
-        )
-        @app_commands.describe(prompt="Prompt to send to your local Ollama model")
-        async def ask(interaction: discord.Interaction, prompt: str) -> None:
-            await interaction.response.defer(thinking=True)
-            try:
-                response = await ask_ollama(prompt)
-                await interaction.followup.send(response)
-            except OllamaError:
-                logger.exception("Slash /ask Ollama request failed")
-                await interaction.followup.send(LLM_ERROR_MESSAGE)
 
     async def start(self) -> None:
         await self.client.start(self.token)

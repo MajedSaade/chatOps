@@ -38,18 +38,16 @@ jobs:
           IMG_NAME: ${{ secrets.DOCKERHUB_USERNAME }}${{ inputs.image }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE || 'default' }}
-          # Updated to match your exact variable names and defaults:
-          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'llama3.2:1b' }}
-          OLLAMA_CHAT_URL: ${{ vars.OLLAMA_CHAT_URL || 'http://host.docker.internal:11434/api/chat' }}
-          OLLAMA_TIMEOUT_SECONDS: ${{ vars.OLLAMA_TIMEOUT_SECONDS || '60' }}
+          AI_GATEWAY_URL: ${{ vars.AI_GATEWAY_URL }}
+          AI_GATEWAY_TIMEOUT_SECONDS: ${{ vars.AI_GATEWAY_TIMEOUT_SECONDS || '30' }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 30m # Extended timeout for downloading the model
-          envs: IMG_NAME,DISCORD_BOT_TOKEN,KUBE_NAMESPACE,OLLAMA_MODEL,OLLAMA_CHAT_URL,OLLAMA_TIMEOUT_SECONDS,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          command_timeout: 15m
+          envs: IMG_NAME,DISCORD_BOT_TOKEN,KUBE_NAMESPACE,AI_GATEWAY_URL,AI_GATEWAY_TIMEOUT_SECONDS,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
           script: |
             set -euo pipefail
 
@@ -61,50 +59,30 @@ jobs:
               sudo systemctl enable --now docker
             fi
 
-            # 2. Check for Ollama and install it if missing
-            if ! command -v ollama >/dev/null 2>&1; then
-              echo "Ollama not found. Installing Ollama..."
-              curl -fsSL https://ollama.com/install.sh | sh
-              sudo systemctl enable --now ollama || true
+            if [[ -z "${AI_GATEWAY_URL}" ]]; then
+              echo "AI_GATEWAY_URL is required but not set."
+              exit 1
             fi
-
-            # 3. Ensure Ollama is running, then pull the specific model
-            echo "Ensuring Ollama service is running..."
-            sudo mkdir -p /etc/systemd/system/ollama.service.d
-            sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null << 'UNITEOF'
-            [Service]
-            Environment="OLLAMA_HOST=0.0.0.0:11434"
-            UNITEOF
-            sudo systemctl daemon-reload
-            sudo systemctl restart ollama
-            sleep 5 
-
-            echo "Checking Ollama health endpoint..."
-            curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
-            
-            echo "Pulling AI model: ${OLLAMA_MODEL} (This will take a few minutes on the first run!)..."
-            ollama pull ${OLLAMA_MODEL}
 
             cd ~/discordapp-deploy
 
             # 4. Rename the copied file so docker compose recognizes it automatically
             mv docker-compose.app.yaml docker-compose.yml || true
 
-            # 5. Generate .env file with your specific variables
+            # 3. Generate .env file with runtime variables
             cat > .env << EOL
             IMG_NAME=${IMG_NAME}
             ENVIRONMENT=production
             DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
             KUBE_NAMESPACE=${KUBE_NAMESPACE}
-            OLLAMA_MODEL=${OLLAMA_MODEL}
-            OLLAMA_CHAT_URL=${OLLAMA_CHAT_URL}
-            OLLAMA_TIMEOUT_SECONDS=${OLLAMA_TIMEOUT_SECONDS}
+            AI_GATEWAY_URL=${AI_GATEWAY_URL}
+            AI_GATEWAY_TIMEOUT_SECONDS=${AI_GATEWAY_TIMEOUT_SECONDS}
             EOL
 
-            # 6. Log into Docker Hub securely
+            # 4. Log into Docker Hub securely
             echo "${DOCKERHUB_TOKEN}" | sudo docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-            # 7. Pull updates and restart gracefully
+            # 5. Pull updates and restart gracefully
             sudo -E docker compose down --remove-orphans || true
             sudo -E docker compose pull
             sudo -E docker compose up -d
