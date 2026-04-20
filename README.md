@@ -33,7 +33,7 @@ Set these values in `.env`:
 - `ENVIRONMENT` (`production` or `development`)
 - `STATUS_SERVER_PORT` (optional, default `8443`)
 - `KUBE_NAMESPACE` (optional, default `default`)
-- `AI_GATEWAY_URL` (required, your backend endpoint)
+- `AI_GATEWAY_URL` (optional, default `http://127.0.0.1:8080/process-command` for local runs)
 - `AI_GATEWAY_TIMEOUT_SECONDS` (optional, default `30`)
 
 ### 4. Run the app
@@ -95,6 +95,6 @@ Optional GitHub variables:
 
 - `DOCKERHUB_REPOSITORY` (default: `discordapp`)
 - `KUBE_NAMESPACE` (default: `default`)
-- `AI_GATEWAY_URL` (required)
+- `AI_GATEWAY_URL` (optional; if unset, deploy defaults to `http://host.docker.internal:8080/process-command`)
 - `AI_GATEWAY_TIMEOUT_SECONDS` (default: `30`)
 - `STATUS_SERVER_PORT` (default: `8443`)

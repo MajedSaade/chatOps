@@ -60,8 +60,8 @@ jobs:
             fi
 
             if [[ -z "${AI_GATEWAY_URL}" ]]; then
-              echo "AI_GATEWAY_URL is required but not set."
-              exit 1
+              AI_GATEWAY_URL="http://host.docker.internal:8080/process-command"
+              echo "AI_GATEWAY_URL not set. Falling back to ${AI_GATEWAY_URL}."
             fi
 
             cd ~/discordapp-deploy
