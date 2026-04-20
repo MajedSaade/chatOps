@@ -32,5 +32,5 @@ if _missing:
 KUBE_NAMESPACE: str = os.getenv("KUBE_NAMESPACE", "default")
 
 # External AI gateway endpoint for command relays
-AI_GATEWAY_URL: str = os.getenv("AI_GATEWAY_URL", "")
+AI_GATEWAY_URL: str = os.getenv("AI_GATEWAY_URL", "http://127.0.0.1:8080/process-command")
 AI_GATEWAY_TIMEOUT_SECONDS: int = int(os.getenv("AI_GATEWAY_TIMEOUT_SECONDS", "30"))

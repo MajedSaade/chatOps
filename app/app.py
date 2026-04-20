@@ -24,7 +24,7 @@ if ENVIRONMENT == "development":
 else:
     DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 
-AI_GATEWAY_URL = os.getenv("AI_GATEWAY_URL", "").strip()
+AI_GATEWAY_URL = os.getenv("AI_GATEWAY_URL", "http://127.0.0.1:8080/process-command").strip()
 
 STATUS_SERVER_PORT = int(os.getenv("STATUS_SERVER_PORT", "8443"))
 

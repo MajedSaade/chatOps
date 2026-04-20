@@ -2,15 +2,21 @@ import logging
 import asyncio
 import os
 
-import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from app.commands import get_aws_cost, get_cluster_health, get_logs
+from app.commands import (
+    analyze_ollama,
+    ask_ollama,
+    detect_yolo,
+    get_aws_cost,
+    get_cluster_health,
+    get_logs,
+    run_gateway_command,
+)
 
 logger = logging.getLogger("discord-bot")
-GATEWAY_ERROR_MESSAGE = "I couldn't reach the AI gateway right now. Please try again shortly."
 
 
 class GatewayBot:
@@ -19,8 +25,7 @@ class GatewayBot:
         intents.message_content = True
 
         self.token = token
-        self.ai_gateway_url = os.getenv("AI_GATEWAY_URL", "").strip()
-        self.ai_gateway_timeout_seconds = int(os.getenv("AI_GATEWAY_TIMEOUT_SECONDS", "30"))
+        self.dev_guild_id = int(os.getenv("DISCORD_GUILD_ID", "0"))
         self.client = commands.Bot(command_prefix="!", intents=intents)
         self._presence_task: asyncio.Task | None = None
         self._synced = False
@@ -37,34 +42,6 @@ class GatewayBot:
             ):
                 return attachment.url
         return None
-
-    async def _build_gateway_payload(self, message: discord.Message) -> dict[str, str | None]:
-        return {
-            "user_id": str(message.author.id),
-            "command_text": message.content,
-            "image_url": self._extract_first_image_url(message),
-        }
-
-    async def _relay_to_gateway(self, payload: dict[str, str | None]) -> str:
-        if not self.ai_gateway_url:
-            raise RuntimeError("AI_GATEWAY_URL is not configured")
-
-        timeout = aiohttp.ClientTimeout(total=self.ai_gateway_timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self.ai_gateway_url, json=payload) as response:
-                if response.status >= 400:
-                    body = await response.text()
-                    raise RuntimeError(
-                        f"Gateway returned HTTP {response.status}: {body[:300]}"
-                    )
-
-                data = await response.json()
-                for key in ("text", "response", "result", "message"):
-                    value = data.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-
-                raise RuntimeError("Gateway response JSON did not include a text field")
 
     async def _set_online_presence(self) -> None:
         await self.client.change_presence(
@@ -84,9 +61,38 @@ class GatewayBot:
         async def on_ready() -> None:
             await self._set_online_presence()
             if not self._synced:
-                await self.client.tree.sync()
+                if self.dev_guild_id:
+                    guild = discord.Object(id=self.dev_guild_id)
+                    self.client.tree.clear_commands(guild=guild)
+                    self.client.tree.copy_global_to(guild=guild)
+                    guild_commands = await self.client.tree.sync(guild=guild)
+                    logger.info(
+                        "Slash commands synced to guild %s: %s",
+                        self.dev_guild_id,
+                        [command.name for command in guild_commands],
+                    )
+                else:
+                    # Mirror global commands to each connected guild for faster availability.
+                    for guild in self.client.guilds:
+                        self.client.tree.clear_commands(guild=guild)
+                        self.client.tree.copy_global_to(guild=guild)
+                        guild_commands = await self.client.tree.sync(guild=guild)
+                        logger.info(
+                            "Slash commands synced to guild %s (%s): %s",
+                            guild.id,
+                            guild.name,
+                            [command.name for command in guild_commands],
+                        )
+
+                # Avoid duplicate command entries by clearing global registrations
+                # when we are serving guild-scoped commands.
+                self.client.tree.clear_commands(guild=None)
+                global_commands = await self.client.tree.sync()
                 self._synced = True
-                logger.info("Slash commands synced globally")
+                logger.info(
+                    "Slash commands synced globally: %s",
+                    [command.name for command in global_commands],
+                )
 
             logger.info("Bot online as %s (ID: %s)", self.client.user, self.client.user.id)
             logger.info("Listening in %d server(s)", len(self.client.guilds))
@@ -110,16 +116,17 @@ class GatewayBot:
             if message.content.strip().startswith("!"):
                 return
 
-            payload = await self._build_gateway_payload(message)
-            logger.info("Relaying payload for user %s", payload["user_id"])
+            user_id = str(message.author.id)
+            command_text = message.content
+            image_url = self._extract_first_image_url(message)
 
-            try:
-                async with message.channel.typing():
-                    response_text = await self._relay_to_gateway(payload)
-                await message.reply(response_text, mention_author=False)
-            except (RuntimeError, aiohttp.ClientError, aiohttp.ContentTypeError, asyncio.TimeoutError):
-                logger.exception("Gateway relay request failed")
-                await message.reply(GATEWAY_ERROR_MESSAGE, mention_author=False)
+            async with message.channel.typing():
+                response_text = await run_gateway_command(
+                    user_id=user_id,
+                    command_text=command_text,
+                    image_url=image_url,
+                )
+            await message.reply(response_text, mention_author=False)
 
     async def _presence_refresher(self) -> None:
         while not self.client.is_closed():
@@ -154,6 +161,42 @@ class GatewayBot:
         async def aws_cost(interaction: discord.Interaction) -> None:
             await interaction.response.defer(thinking=True)
             await interaction.followup.send(get_aws_cost())
+
+        @self.client.tree.command(
+            name="ask",
+            description="Send a prompt through the AI gateway",
+        )
+        @app_commands.describe(prompt="Prompt text to send to /ask")
+        async def ask(interaction: discord.Interaction, prompt: str) -> None:
+            await interaction.response.defer(thinking=True)
+            await interaction.followup.send(await ask_ollama(str(interaction.user.id), prompt))
+
+        @self.client.tree.command(
+            name="analyze",
+            description="Run deep analysis on input text through the AI gateway",
+        )
+        @app_commands.describe(user_input="Text/data to analyze")
+        async def analyze(interaction: discord.Interaction, user_input: str) -> None:
+            await interaction.response.defer(thinking=True)
+            await interaction.followup.send(await analyze_ollama(str(interaction.user.id), user_input))
+
+        @self.client.tree.command(
+            name="detect",
+            description="Run object detection through the AI gateway",
+        )
+        @app_commands.describe(image="Image file to run detection on")
+        async def detect(interaction: discord.Interaction, image: discord.Attachment) -> None:
+            await interaction.response.defer(thinking=True)
+
+            content_type = (image.content_type or "").lower()
+            filename = image.filename.lower()
+            if not content_type.startswith("image/") and not filename.endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+            ):
+                await interaction.followup.send("⚠️ Please upload an image file for /detect.")
+                return
+
+            await interaction.followup.send(await detect_yolo(str(interaction.user.id), image.url))
 
     async def start(self) -> None:
         await self.client.start(self.token)
