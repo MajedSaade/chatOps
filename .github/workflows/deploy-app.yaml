@@ -60,7 +60,7 @@ jobs:
             fi
 
             if [[ -z "${AI_GATEWAY_URL}" ]]; then
-              AI_GATEWAY_URL="http://10.0.0.154:8080/process-command"
+              AI_GATEWAY_URL="http://10.0.0.107:8080/process-command"
               echo "AI_GATEWAY_URL not set. Falling back to ${AI_GATEWAY_URL}."
             fi
 
