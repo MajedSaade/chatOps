@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import threading
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -46,6 +47,15 @@ async def main() -> None:
         raise SystemExit("ERROR: DISCORD_BOT_TOKEN or DISCORD_DEV_BOT_TOKEN must be set")
     if not AI_GATEWAY_URL:
         raise SystemExit("ERROR: AI_GATEWAY_URL must be set")
+
+    parsed = urlparse(AI_GATEWAY_URL)
+    running_in_container = os.path.exists("/.dockerenv")
+    if running_in_container and parsed.hostname in {"127.0.0.1", "localhost"}:
+        logger.warning(
+            "AI_GATEWAY_URL points to loopback inside container: %s. "
+            "If gateway runs on host or another container, use host.docker.internal or service DNS.",
+            AI_GATEWAY_URL,
+        )
 
     status_thread = threading.Thread(target=run_status_server, daemon=True)
     status_thread.start()

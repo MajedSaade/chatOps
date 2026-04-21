@@ -8,7 +8,11 @@ result. Used by the gateway bot's slash commands.
 import json
 import logging
 import os
+import random
+import asyncio
 from datetime import datetime, timezone
+from urllib.parse import urlparse
+from uuid import uuid4
 
 from kubernetes import client as k8s_client, config as k8s_config
 import boto3
@@ -31,7 +35,31 @@ class GatewayResponseError(RuntimeError):
 
 
 def _gateway_url() -> str:
-    return os.getenv("AI_GATEWAY_URL", DEFAULT_AI_GATEWAY_URL).strip() or DEFAULT_AI_GATEWAY_URL
+    raw = os.getenv("AI_GATEWAY_URL", "").strip() or os.getenv("AI_GATEWAY_BASE_URL", "").strip()
+    if not raw:
+        return DEFAULT_AI_GATEWAY_URL
+
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        logger.warning("gateway.config.invalid_url raw=%s fallback=%s", raw, DEFAULT_AI_GATEWAY_URL)
+        return DEFAULT_AI_GATEWAY_URL
+
+    if parsed.path in ("", "/"):
+        normalized = raw.rstrip("/") + "/process-command"
+        logger.info("gateway.config.normalized_path from=%s to=%s", raw, normalized)
+        raw = normalized
+        parsed = urlparse(raw)
+
+    if os.path.exists("/.dockerenv") and parsed.hostname in {"127.0.0.1", "localhost"}:
+        host_rewritten = raw.replace(parsed.hostname, "host.docker.internal", 1)
+        logger.warning(
+            "gateway.config.rewrite_loopback_in_container from=%s to=%s",
+            raw,
+            host_rewritten,
+        )
+        return host_rewritten
+
+    return raw
 
 
 def _command_prefix(command_text: str) -> str:
@@ -66,6 +94,32 @@ def _extract_gateway_text(data: dict) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _response_snippet(body: str, limit: int = 300) -> str:
+    return body.replace("\n", " ").strip()[:limit]
+
+
+def _map_gateway_error_for_user(status: int, detail: str | None) -> str:
+    if status == 400:
+        return detail or "Invalid request sent to AI gateway."
+    if status == 404:
+        return "AI gateway endpoint was not found."
+    if status == 408:
+        return "AI gateway timed out while processing your command."
+    if status == 413:
+        return "Your command is too large for the AI gateway."
+    if status == 422:
+        return detail or "Your command format is invalid. Use ask/..., analyze/..., or detect/..."
+    if status == 429:
+        return "AI gateway is rate-limited right now. Please retry shortly."
+    if status >= 500:
+        return "AI gateway failed while processing your command."
+    return detail or f"Gateway returned HTTP {status}."
+
+
+def _is_likely_transient(exc: Exception) -> bool:
+    return isinstance(exc, (aiohttp.ClientConnectorError, aiohttp.ClientOSError, aiohttp.ServerTimeoutError, TimeoutError))
 
 
 def _format_detect_results(data: dict) -> str | None:
@@ -104,66 +158,118 @@ async def call_ai_gateway(
     user_id: str,
     command_text: str,
     image_url: str | None = None,
+    request_id: str | None = None,
+    discord_channel_id: str | None = None,
+    source: str = "discord",
 ) -> dict:
     """Send a command payload to the AI gateway and return parsed JSON."""
     if not command_text.strip():
         raise GatewayResponseError("Command text cannot be empty.")
 
     gateway_url = _gateway_url()
+    trace_id = request_id or str(uuid4())
+    retries = max(0, int(os.getenv("AI_GATEWAY_RETRY_ATTEMPTS", "1")))
+    backoff_seconds = max(0.0, float(os.getenv("AI_GATEWAY_RETRY_BACKOFF_SECONDS", "0.35")))
     command_prefix = _command_prefix(command_text)
     payload = {
         "user_id": str(user_id),
-        "command_text": command_text,
-        "image_url": image_url,
+        "command_text": str(command_text),
     }
+    if image_url:
+        payload["image_url"] = str(image_url)
 
     timeout = aiohttp.ClientTimeout(total=int(os.getenv("AI_GATEWAY_TIMEOUT_SECONDS", "30")))
-    logger.info("AI gateway request url=%s command_prefix=%s", gateway_url, command_prefix)
+    headers = {
+        "Accept": "application/json",
+        "X-Request-ID": trace_id,
+    }
 
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(gateway_url, json=payload) as response:
-                logger.info(
-                    "AI gateway response status=%s command_prefix=%s",
-                    response.status,
-                    command_prefix,
-                )
+    for attempt in range(retries + 1):
+        logger.info(
+            "gateway.request request_id=%s source=%s discord_user_id=%s discord_channel_id=%s command_type=%s url=%s method=POST timeout_s=%s attempt=%s",
+            trace_id,
+            source,
+            str(user_id),
+            discord_channel_id or "unknown",
+            command_prefix,
+            gateway_url,
+            timeout.total,
+            attempt + 1,
+        )
 
-                if response.status >= 400:
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(gateway_url, json=payload, headers=headers) as response:
                     body = (await response.text()).strip()
-                    concise_body = body.replace("\n", " ")[:300]
-                    logger.warning(
-                        "AI gateway non-200 status=%s command_prefix=%s body=%s",
+                    snippet = _response_snippet(body)
+                    logger.info(
+                        "gateway.response request_id=%s status_code=%s command_type=%s body_snippet=%s",
+                        trace_id,
                         response.status,
                         command_prefix,
-                        concise_body,
+                        snippet,
                     )
 
-                    user_error = f"Gateway returned HTTP {response.status}."
-                    if body:
-                        try:
-                            data = json.loads(body)
-                            if isinstance(data, dict):
-                                extracted = _extract_gateway_error(data)
-                                if extracted:
-                                    user_error = extracted
-                        except json.JSONDecodeError:
-                            pass
+                    if response.status >= 400:
+                        detail = None
+                        if body:
+                            try:
+                                data = json.loads(body)
+                                if isinstance(data, dict):
+                                    detail = _extract_gateway_error(data)
+                            except json.JSONDecodeError:
+                                detail = None
 
-                    raise GatewayResponseError(user_error)
+                        mapped_error = _map_gateway_error_for_user(response.status, detail)
+                        logger.warning(
+                            "gateway.non_2xx request_id=%s status_code=%s command_type=%s url=%s mapped_error=%s body_snippet=%s",
+                            trace_id,
+                            response.status,
+                            command_prefix,
+                            gateway_url,
+                            mapped_error,
+                            snippet,
+                        )
+                        raise GatewayResponseError(mapped_error)
 
-                try:
-                    data = await response.json(content_type=None)
-                except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                    raise GatewayResponseError("Gateway returned invalid JSON.")
+                    try:
+                        data = json.loads(body) if body else {}
+                    except json.JSONDecodeError:
+                        logger.error(
+                            "gateway.invalid_json request_id=%s status_code=%s command_type=%s body_snippet=%s",
+                            trace_id,
+                            response.status,
+                            command_prefix,
+                            snippet,
+                        )
+                        raise GatewayResponseError("Gateway returned invalid JSON.")
 
-                if not isinstance(data, dict):
-                    raise GatewayResponseError("Gateway response format is unsupported.")
+                    if not isinstance(data, dict):
+                        logger.error(
+                            "gateway.invalid_format request_id=%s command_type=%s type=%s",
+                            trace_id,
+                            command_prefix,
+                            type(data).__name__,
+                        )
+                        raise GatewayResponseError("Gateway response format is unsupported.")
 
-                return data
-    except (aiohttp.ClientConnectorError, aiohttp.ClientError, TimeoutError) as exc:
-        logger.warning("AI gateway unavailable command_prefix=%s error=%s", command_prefix, exc)
-        raise GatewayUnavailableError("AI gateway unavailable")
+                    return data
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            transient = _is_likely_transient(exc)
+            logger.warning(
+                "gateway.network_error request_id=%s command_type=%s url=%s error_class=%s transient=%s message=%s",
+                trace_id,
+                command_prefix,
+                gateway_url,
+                exc.__class__.__name__,
+                transient,
+                str(exc),
+            )
+            if transient and attempt < retries:
+                # Small jitter helps avoid synchronized retries under shared failure.
+                await asyncio.sleep(backoff_seconds + random.uniform(0.0, 0.15))
+                continue
+            raise GatewayUnavailableError("AI gateway unavailable")
 
 
 def format_gateway_success(data: dict) -> str:
@@ -179,14 +285,38 @@ def format_gateway_success(data: dict) -> str:
     return f"✅ Gateway response:\n```json\n{json.dumps(data, indent=2)[:1500]}\n```"
 
 
-async def run_gateway_command(user_id: str, command_text: str, image_url: str | None = None) -> str:
+async def run_gateway_command(
+    user_id: str,
+    command_text: str,
+    image_url: str | None = None,
+    discord_channel_id: str | None = None,
+    request_id: str | None = None,
+    source: str = "discord",
+) -> str:
     """Execute a command through the AI gateway with clean user-facing failures."""
     try:
-        data = await call_ai_gateway(user_id=user_id, command_text=command_text, image_url=image_url)
+        data = await call_ai_gateway(
+            user_id=user_id,
+            command_text=command_text,
+            image_url=image_url,
+            request_id=request_id,
+            discord_channel_id=discord_channel_id,
+            source=source,
+        )
     except GatewayUnavailableError:
         return GATEWAY_UNAVAILABLE_MESSAGE
     except GatewayResponseError as exc:
         return f"❌ {exc}"
+    except Exception:
+        logger.exception(
+            "gateway.unhandled_exception request_id=%s source=%s discord_user_id=%s discord_channel_id=%s command_type=%s",
+            request_id or "unknown",
+            source,
+            str(user_id),
+            discord_channel_id or "unknown",
+            _command_prefix(command_text),
+        )
+        return "❌ Unexpected error while processing your request."
 
     error_text = _extract_gateway_error(data)
     if error_text and not _extract_gateway_text(data):
@@ -280,22 +410,56 @@ def get_aws_cost() -> str:
         return f"❌ Failed to fetch AWS costs:\n```{exc}```"
 
 
-async def ask_ollama(user_id: str, prompt: str) -> str:
+async def ask_ollama(
+    user_id: str,
+    prompt: str,
+    request_id: str | None = None,
+    discord_channel_id: str | None = None,
+) -> str:
     """Run /ask through the AI gateway."""
     if not prompt.strip():
         return "⚠️ Please provide a prompt for /ask."
-    return await run_gateway_command(user_id=user_id, command_text=f"ask/{prompt.strip()}")
+    return await run_gateway_command(
+        user_id=user_id,
+        command_text=f"ask/{prompt.strip()}",
+        request_id=request_id,
+        discord_channel_id=discord_channel_id,
+        source="discord-slash-ask",
+    )
 
 
-async def analyze_ollama(user_id: str, user_input: str) -> str:
+async def analyze_ollama(
+    user_id: str,
+    user_input: str,
+    request_id: str | None = None,
+    discord_channel_id: str | None = None,
+) -> str:
     """Run /analyze through the AI gateway."""
     if not user_input.strip():
         return "⚠️ Please provide text/data for /analyze."
-    return await run_gateway_command(user_id=user_id, command_text=f"analyze/{user_input.strip()}")
+    return await run_gateway_command(
+        user_id=user_id,
+        command_text=f"analyze/{user_input.strip()}",
+        request_id=request_id,
+        discord_channel_id=discord_channel_id,
+        source="discord-slash-analyze",
+    )
 
 
-async def detect_yolo(user_id: str, image_url: str | None) -> str:
+async def detect_yolo(
+    user_id: str,
+    image_url: str | None,
+    request_id: str | None = None,
+    discord_channel_id: str | None = None,
+) -> str:
     """Run /detect through the AI gateway."""
     if not image_url:
         return "⚠️ Please provide an image URL for /detect."
-    return await run_gateway_command(user_id=user_id, command_text="detect/image", image_url=image_url)
+    return await run_gateway_command(
+        user_id=user_id,
+        command_text="detect/image",
+        image_url=image_url,
+        request_id=request_id,
+        discord_channel_id=discord_channel_id,
+        source="discord-slash-detect",
+    )

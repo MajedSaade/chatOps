@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import os
+from uuid import uuid4
 
 import discord
 from discord import app_commands
@@ -119,12 +120,24 @@ class GatewayBot:
             user_id = str(message.author.id)
             command_text = message.content
             image_url = self._extract_first_image_url(message)
+            request_id = str(uuid4())
+
+            logger.info(
+                "discord.command.received request_id=%s source=message discord_user_id=%s discord_channel_id=%s has_image=%s",
+                request_id,
+                user_id,
+                str(message.channel.id),
+                bool(image_url),
+            )
 
             async with message.channel.typing():
                 response_text = await run_gateway_command(
                     user_id=user_id,
                     command_text=command_text,
                     image_url=image_url,
+                    discord_channel_id=str(message.channel.id),
+                    request_id=request_id,
+                    source="discord-message",
                 )
             await message.reply(response_text, mention_author=False)
 
@@ -169,7 +182,15 @@ class GatewayBot:
         @app_commands.describe(prompt="Prompt text to send to /ask")
         async def ask(interaction: discord.Interaction, prompt: str) -> None:
             await interaction.response.defer(thinking=True)
-            await interaction.followup.send(await ask_ollama(str(interaction.user.id), prompt))
+            request_id = str(uuid4())
+            await interaction.followup.send(
+                await ask_ollama(
+                    str(interaction.user.id),
+                    prompt,
+                    request_id=request_id,
+                    discord_channel_id=str(interaction.channel_id or ""),
+                )
+            )
 
         @self.client.tree.command(
             name="analyze",
@@ -178,7 +199,15 @@ class GatewayBot:
         @app_commands.describe(user_input="Text/data to analyze")
         async def analyze(interaction: discord.Interaction, user_input: str) -> None:
             await interaction.response.defer(thinking=True)
-            await interaction.followup.send(await analyze_ollama(str(interaction.user.id), user_input))
+            request_id = str(uuid4())
+            await interaction.followup.send(
+                await analyze_ollama(
+                    str(interaction.user.id),
+                    user_input,
+                    request_id=request_id,
+                    discord_channel_id=str(interaction.channel_id or ""),
+                )
+            )
 
         @self.client.tree.command(
             name="detect",
@@ -187,6 +216,7 @@ class GatewayBot:
         @app_commands.describe(image="Image file to run detection on")
         async def detect(interaction: discord.Interaction, image: discord.Attachment) -> None:
             await interaction.response.defer(thinking=True)
+            request_id = str(uuid4())
 
             content_type = (image.content_type or "").lower()
             filename = image.filename.lower()
@@ -196,7 +226,14 @@ class GatewayBot:
                 await interaction.followup.send("⚠️ Please upload an image file for /detect.")
                 return
 
-            await interaction.followup.send(await detect_yolo(str(interaction.user.id), image.url))
+            await interaction.followup.send(
+                await detect_yolo(
+                    str(interaction.user.id),
+                    image.url,
+                    request_id=request_id,
+                    discord_channel_id=str(interaction.channel_id or ""),
+                )
+            )
 
     async def start(self) -> None:
         await self.client.start(self.token)
